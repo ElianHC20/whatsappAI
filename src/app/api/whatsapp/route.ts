@@ -656,8 +656,11 @@ ${resumenChats}`;
             }
 if (modoHumanoActivo) {
     console.log("[HUMANO ACTIVO] Guardando msg sin responder");
-    const msgHumano: any = { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() };
-    if (eraAudio && mediaUrl0) { msgHumano.mediaUrl = mediaUrl0; msgHumano.mediaType = mediaType0; }
+const msgHumano: any = { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() };
+if (mediaUrl0 && numMedia > 0) { 
+    msgHumano.mediaUrl = mediaUrl0; 
+    msgHumano.mediaType = mediaType0 || 'application/octet-stream'; 
+}
     await chatRef.set({
         profileName,
         messages: admin.firestore.FieldValue.arrayUnion(msgHumano),
@@ -1098,9 +1101,15 @@ if (fechaInvalida || !tieneFechaYHora(todosLosMsgs)) {
 
             await twilioClient.messages.create({ from: to, to: from, body: textoRespuesta });
 // Guardar con mediaUrl si era audio
-const msgUsuarioParaGuardar = eraAudio
-    ? { role: 'user', content: bodyFinal, mediaUrl: mediaUrl0, mediaType: mediaType0, timestamp: new Date().toISOString() }
-    : { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() };
+const msgUsuarioParaGuardar: any = { 
+    role: 'user', 
+    content: bodyFinal, 
+    timestamp: new Date().toISOString() 
+};
+if (mediaUrl0 && numMedia > 0) {
+    msgUsuarioParaGuardar.mediaUrl = mediaUrl0;
+    msgUsuarioParaGuardar.mediaType = mediaType0 || 'application/octet-stream';
+}
 
 await chatRef.set({
     profileName,
