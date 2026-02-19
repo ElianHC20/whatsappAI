@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
+import { db } from '@/lib/firebaseAdmin';
 import Twilio from 'twilio';
 import * as admin from 'firebase-admin';
 

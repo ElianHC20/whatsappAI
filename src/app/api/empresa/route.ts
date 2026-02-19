@@ -1,174 +1,319 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
+import { db } from '@/lib/firebaseAdmin';
 import * as admin from 'firebase-admin';
 
-// =================================================================================
-// 1. MÉTODO GET (INTACTO)
-// =================================================================================
 export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const telefono = searchParams.get('telefono');
-
-    if (!telefono) {
-        return NextResponse.json({ error: "Falta el teléfono" }, { status: 400 });
-    }
-
-    const idEmpresaLimpio = telefono.replace('whatsapp:', '').replace(/[^0-9+]/g, '');
-
+    if (!telefono) return NextResponse.json({ error: "Falta el teléfono" }, { status: 400 });
+    const limpio = telefono.replace('whatsapp:', '').replace(/[^0-9+]/g, '');
+    const variaciones = [limpio, limpio.startsWith('+') ? limpio.substring(1) : `+${limpio}`, `whatsapp:${limpio}`];
     try {
-        const doc = await db.collection('empresas').doc(idEmpresaLimpio).get();
-        if (!doc.exists) {
-            return NextResponse.json({ error: "No se encontró empresa" }, { status: 404 });
+        for (const id of variaciones) {
+            const doc = await db.collection('empresas').doc(id).get();
+            if (doc.exists) return NextResponse.json(doc.data());
         }
-        return NextResponse.json(doc.data());
+        return NextResponse.json({ error: "No se encontró empresa" }, { status: 404 });
     } catch (error) {
-        console.error("Error GET:", error);
         return NextResponse.json({ error: "Error interno" }, { status: 500 });
     }
 }
 
-// =================================================================================
-// 2. MÉTODO POST (CEREBRO CON PRESIÓN DE VENTA MODERADA Y SEGURO)
-// =================================================================================
 export async function POST(req: NextRequest) {
-  try {
-    const data = await req.json();
+    try {
+        const rawData = await req.json();
+        if (!rawData.telefonoTwilio) return NextResponse.json({ error: "Falta número del bot" }, { status: 400 });
 
-    if (!data.telefonoTwilio) {
-        return NextResponse.json({ error: "Falta número del bot" }, { status: 400 });
-    }
+        const catalogoLimpio = (rawData.catalogo || []).map((cat: any) => ({
+            nombre: String(cat.nombre || "Sin Categoría"),
+            items: (cat.items || []).map((prod: any) => ({
+                nombre: String(prod.nombre || ""),
+                descripcion: String(prod.descripcion || ""),
+                precio: String(prod.precio || "0"),
+                tipoPrecio: String(prod.tipoPrecio || "fijo"),
+                frecuencia: String(prod.frecuencia || "Pago Único"),
+                tienePromo: Boolean(prod.tienePromo),
+                detallePromo: String(prod.detallePromo || ""),
+                duracion: String(prod.duracion || ""),
+                detallesIA: String(prod.detallesIA || ""),
+                disponibilidad: String(prod.disponibilidad || "Siempre"),
+                requiereReserva: Boolean(prod.requiereReserva),
+                imagenPrincipal: String(prod.imagenPrincipal || ""),
+                variantes: (prod.variantes || []).map((grupo: any) => ({
+                    nombre: String(grupo.nombre || "General"),
+                    opciones: (grupo.opciones || []).map((op: any) => ({
+                        nombre: String(op.nombre || ""),
+                        imagenUrl: String(op.imagenUrl || "")
+                    }))
+                }))
+            }))
+        }));
 
-    // --- 1. PERSONALIDAD ---
-    let tono = "Tu tono es FORMAL y DIRECTO.";
-    if (data.personalidadIA === "Vender") {
-        tono = "ERES UN ASESOR COMERCIAL EXPERTO. Objetivo: Vender educando. Sé paciente y persuasivo.";
-    } 
-    else if (data.personalidadIA === "Amigable") {
-        tono = "ERES UN AMIGO CONOCEDOR. Trato cercano.";
-    }
+        const data = { ...rawData, catalogo: catalogoLimpio };
 
-    const reglaConcisa = "FORMATO: Respuestas cortas (máx 40 palabras). EMOJIS: Úsalos de forma natural y esporádica (1 o 2 por mensaje máx) para dar calidez.";
-    const extraInstructions = data.instruccionesAdicionales ? `NOTA DEL JEFE: ${data.instruccionesAdicionales}` : "";
+        // PERSONALIDAD
+        let tono = "";
+        switch (data.personalidadIA) {
+            case "Vender":
+                tono = `PERSONALIDAD: Asesor comercial calido y cercano. Tu objetivo es CERRAR VENTAS.
+- Siempre con buena actitud, amabilidad y humildad.
+- Resaltas beneficios con entusiasmo natural, nunca presionando.
+- Cuando el cliente ve una foto, preguntale que le parece y guia al cierre.
+- Si el cliente muestra interes, avanza: "Te lo apartamos?" o "Quieres que procedamos?"
+- Si pregunta precio, responde y pregunta si quiere continuar.
+- Si duda, destaca el beneficio clave y resuelve la duda.
+- NUNCA sueltes precios sin que pregunten. NUNCA seas insistente ni fastidioso.
+- NUNCA dejes al cliente sin guia. Siempre lleva hacia el siguiente paso.`;
+                break;
+            case "Serio":
+                tono = `PERSONALIDAD: Profesional, respetuoso y orientado a resultados.
+- Directo y claro pero siempre amable y cordial.
+- Guias al cliente con confianza hacia la compra.
+- Si muestra interes, avanza: "Perfecto, procedemos?" o "Lo agendamos?"
+- Si pregunta precio, responde y ofrece avanzar.
+- NUNCA sueltes precios sin que pregunten. NUNCA seas seco ni cortante.
+- NUNCA dejes la conversacion sin direccion.`;
+                break;
+            case "Amigable":
+            default:
+                tono = `PERSONALIDAD: Amigable, calido y cercano. Como un amigo que recomienda algo bueno.
+- Natural y humano, te interesas genuinamente por el cliente.
+- Guias la conversacion de forma natural hacia la compra.
+- Si muestra interes, avanza: "Te encantaria tenerlo! Lo procesamos?"
+- Si pregunta precio, responde y sugiere avanzar.
+- NUNCA sueltes precios sin que pregunten. NUNCA seas frio ni robotico.
+- NUNCA dejes al cliente sin guia.`;
+                break;
+        }
 
-    // --- 2. CITAS ---
-    let politicaCitas = "";
-    let prohibicionCitas = "";
+        const extraInstructions = data.instruccionesAdicionales ? `\nINSTRUCCIONES EXTRA: ${data.instruccionesAdicionales}` : "";
+        const temasProhibidos = data.temasProhibidos ? `\nPROHIBIDO HABLAR DE: ${data.temasProhibidos}` : "";
+        const manejoClientesDificiles = data.manejoClientesDificiles
+            ? `\nCLIENTES DIFICILES: ${data.manejoClientesDificiles}`
+            : "\nCLIENTES DIFICILES: Mantente calmado y amable. Ofrece ayuda. Si insiste, dile que un asesor humano lo contactara.";
 
-    if (data.aceptaReservas === true) {
-        politicaCitas = `✅ CITAS: Permitido. Método: ${data.metodoReserva}.`;
-    } else {
-        politicaCitas = `🚫 CITAS: NO gestionas agenda.`;
-        prohibicionCitas = `🛑 PROHIBICIÓN DE AGENDAS: JAMÁS preguntes "¿Te gustaría agendar una cita?". Si piden cita, di que no manejas reservas.`;
-    }
+        // CAMPANAS
+        let logicaCampanas = "";
+        if (data.campanas && data.campanas.length > 0) {
+            const activas = data.campanas.filter((c: any) => c.vigencia !== "EXPIRADO");
+            const expiradas = data.campanas.filter((c: any) => c.vigencia === "EXPIRADO");
+            if (activas.length > 0) {
+                logicaCampanas = `\nCAMPANAS ACTIVAS:\n` + activas.map((c: any) => `Clave: "${c.palabraClave}" -> ${c.contexto} (${c.vigencia})`).join("\n");
+                logicaCampanas += `\nSi el cliente dice una palabra clave, responde con el contexto. PRIMERO pide nombre si no lo tienes.`;
+            }
+            if (expiradas.length > 0) {
+                logicaCampanas += `\nExpiradas: ${expiradas.map((c: any) => `"${c.palabraClave}"`).join(", ")}. Di que ya no estan vigentes.`;
+            }
+        }
 
-    // --- 3. CAMPAÑAS ---
-    let logicaCampanas = "";
-    const campanasTxt = (data.campanas || []).map((c:any) => 
-        `🔑 PALABRA CLAVE: "${c.palabraClave}" -> OFERTA: ${c.contexto} (Vence: ${c.vigencia})`
-    ).join("\n");
+        // PROMOCIONES
+        let logicaPromociones = "";
+        if (data.promociones && data.promociones.length > 0) {
+            logicaPromociones = `\nPROMOCIONES VIGENTES:\n` + data.promociones.map((p: any) =>
+                `"${p.nombre}" en "${p.servicioAsociado}": ${p.detalle}. Precio especial: ${p.precioEspecial}. ${p.vigencia}.`
+            ).join("\n");
+            logicaPromociones += `\nMenciona la promo SOLO cuando hablen del producto asociado.`;
+        }
 
-    if (data.campanas && data.campanas.length > 0) {
-        logicaCampanas = `🚨 PRIORIDAD MÁXIMA: SI EL CLIENTE DICE LA PALABRA CLAVE, IGNORA TODO Y DALE LA OFERTA:\n${campanasTxt}`;
-    }
+        // FAQs
+        let logicaFaqs = "";
+        if (data.faqs && data.faqs.length > 0) {
+            logicaFaqs = `\nPREGUNTAS FRECUENTES:\n` + data.faqs.map((f: any) => `Pregunta: ${f.pregunta}\nRespuesta: ${f.respuesta}`).join("\n\n");
+        }
 
-    // --- 4. DATOS Y PORTAFOLIO ---
-    const metodosPagoTxt = (data.mediosPago && data.mediosPago.length > 0) ? `PAGOS: ${data.mediosPago.join(", ")}.` : "A convenir.";
-    
-    const redes = data.redes || {};
-    const identidadDigitalTxt = `
-    🔗 PORTAFOLIO Y EJEMPLOS (TU RESPONSABILIDAD):
-    Si piden "ver trabajos", "ejemplos", "fotos", "qué han hecho" o "redes":
-    MANDA ESTOS LINKS Y NO ACTIVES LA HERRAMIENTA DE VENTA. ES SOLO INFORMACIÓN.
-    - Web: ${redes.web || "N/A"}
-    - Instagram: ${redes.instagram || "N/A"}
-    - Facebook: ${redes.facebook || "N/A"}
-    `;
+        // HORARIOS
+        let horariosTxt = "";
+        if (data.horarios) {
+            const lineas = Object.entries(data.horarios).map(([dia, val]: [string, any]) =>
+                val.abierto ? `${dia}: ${val.inicio}-${val.fin}` : `${dia}: CERRADO`
+            );
+            horariosTxt = `\nHORARIOS:\n${lineas.join("\n")}\nDa estos horarios generales. No inventes horarios por servicio.`;
+        }
 
-    let catalogoTxt = "";
-    (data.catalogo || []).forEach((cat: any) => {
-        catalogoTxt += `\n📂 CATEGORÍA: ${cat.nombre.toUpperCase()}\n`;
-        cat.items.forEach((item: any) => {
-            catalogoTxt += `• ${item.nombre} -> Precio: $${item.precio || "A cotizar"}. Info: ${item.descripcion}. Detalles IA: ${item.detallesIA}\n`;
+        // REDES
+        let redesTxt = "";
+        const redes = data.redes || {};
+        const redesList: string[] = [];
+        if (redes.instagram) redesList.push(`Instagram: ${redes.instagram}`);
+        if (redes.tiktok) redesList.push(`TikTok: ${redes.tiktok}`);
+        if (redes.facebook) redesList.push(`Facebook: ${redes.facebook}`);
+        if (redes.web) redesList.push(`Web: ${redes.web}`);
+        if (redesList.length > 0) redesTxt = `\nREDES:\n${redesList.join("\n")}`;
+
+        // RESERVAS
+        let hayProductosConReserva = false;
+        if (data.aceptaReservas === true) {
+            data.catalogo.forEach((cat: any) => {
+                cat.items.forEach((item: any) => { if (item.requiereReserva === true) hayProductosConReserva = true; });
+            });
+        }
+
+        let politicaReservas = "";
+        if (hayProductosConReserva) {
+            politicaReservas = `\nRESERVAS: Solo [REQUIERE RESERVA] se reservan.
+SIEMPRE pide FECHA y luego HORA antes de confirmar reserva.
+NUNCA llames notificar_reserva sin fecha y hora concretas.
+Metodo: ${data.metodoReserva || "WhatsApp"}.
+${data.reglasReserva ? `Reglas: ${data.reglasReserva}` : ""}`;
+        } else {
+            politicaReservas = "\nNO hay reservas.";
+        }
+
+        const terminosCondiciones = data.terminosCondiciones
+            ? `\nTERMINOS Y CONDICIONES:\n${data.terminosCondiciones}\nSi preguntan por terminos, politicas, garantias o condiciones, responde con esta info.`
+            : "";
+
+        // CATALOGO
+        let catalogoTxt = "";
+        let hayAlgunaFotoEnCatalogo = false;
+
+        data.catalogo.forEach((cat: any) => {
+            const nombresProductos = cat.items.map((i: any) => i.nombre).filter((n: string) => n).join(", ");
+            catalogoTxt += `\n=== CATEGORIA: ${cat.nombre.toUpperCase()} ===\n`;
+            catalogoTxt += `Productos en esta categoria: ${nombresProductos || "ninguno"}.\n`;
+
+            cat.items.forEach((item: any) => {
+                const infoPrecio = (item.tipoPrecio === 'cotizar') ? "A COTIZAR" : `$${item.precio}`;
+                const tieneImgPrincipal = item.imagenPrincipal && item.imagenPrincipal.trim() !== "";
+                const imgPrincipal = tieneImgPrincipal ? `FOTO: ${item.imagenPrincipal}` : "SIN FOTO";
+                if (tieneImgPrincipal) hayAlgunaFotoEnCatalogo = true;
+
+                let infoVariantes = "  VARIANTES: ninguna\n";
+                if (item.variantes && item.variantes.length > 0) {
+                    const grupos: string[] = [];
+                    const nombresGrupos: string[] = [];
+                    item.variantes.forEach((v: any) => {
+                        if (!v.opciones || v.opciones.length === 0) return;
+                        nombresGrupos.push(v.nombre);
+                        const ops = v.opciones.map((o: any) => {
+                            const tieneImg = o.imagenUrl && o.imagenUrl.trim() !== "";
+                            if (tieneImg) hayAlgunaFotoEnCatalogo = true;
+                            return tieneImg ? `${o.nombre}(foto:${o.imagenUrl})` : `${o.nombre}(SIN FOTO)`;
+                        }).join(", ");
+                        grupos.push(`    ${v.nombre}: [${ops}]`);
+                    });
+                    if (grupos.length > 0) {
+                        infoVariantes = `  GRUPOS DE VARIANTES (menciona estos grupos al presentar el producto): ${nombresGrupos.join(", ")}\n`;
+                        infoVariantes += `  OPCIONES POR GRUPO (revelar SOLO cuando el cliente pregunte):\n${grupos.join("\n")}\n`;
+                        infoVariantes += `  IMPORTANTE: Al presentar di que tiene variantes de ${nombresGrupos.join(" y ")} pero NO listes las opciones aun.\n`;
+                    }
+                }
+
+                const esReservable = (data.aceptaReservas === true && item.requiereReserva === true);
+                const etiqueta = esReservable ? "[REQUIERE RESERVA]" : "[VENTA DIRECTA]";
+
+                catalogoTxt += `\n  PRODUCTO: ${item.nombre} ${etiqueta}
+  Precio: ${infoPrecio}${item.frecuencia !== "Pago Único" ? ` (${item.frecuencia})` : ""}
+  Imagen principal: ${imgPrincipal}
+${infoVariantes}`;
+                if (item.descripcion) catalogoTxt += `  Descripcion: ${item.descripcion}\n`;
+                if (item.duracion) catalogoTxt += `  Duracion: ${item.duracion}\n`;
+                if (item.detallesIA) catalogoTxt += `  Contexto adicional: ${item.detallesIA}\n`;
+                if (item.tienePromo) catalogoTxt += `  PROMO: ${item.detallePromo}\n`;
+            });
         });
-    });
 
-    const faqsTxt = (data.faqs || []).map((f:any) => `P: ${f.pregunta}\nR: ${f.respuesta}`).join("\n\n");
-    const legalTxt = `Pagos: ${data.instruccionesPago}\nTérminos: ${data.terminosCondiciones}`;
+        // FOTOS
+        let instruccionesFotos = "";
+        if (!hayAlgunaFotoEnCatalogo) {
+            instruccionesFotos = `FOTOS:
+- NO hay fotos en el catalogo.
+- NUNCA ofrezcas mostrar fotos ni imagenes de ningun producto.
+- NUNCA digas "quieres verlo?", "te muestro?", "te envio imagen?" ni nada parecido.
+- NUNCA llames la funcion enviar_foto.
+- Describe los productos solo con palabras.`;
+        } else {
+            instruccionesFotos = `FOTOS:
+- SOLO ofrece foto si el producto tiene "FOTO:" seguido de una URL https://...
+- Si dice "SIN FOTO": PROHIBIDO ofrecer foto de ese producto.
+- NUNCA envies foto sin que el cliente la pida explicitamente ("quiero verlo", "muestrame", etc.)
+- Producto con variantes: pregunta cual quiere ver, SOLO variantes con foto URL.
+- Despues de enviar foto: pregunta que le parece y guia al cierre.
+- REGLA DE ORO: Sin URL = NO ofrezcas foto. Punto.`;
+        }
 
-    // =================================================================================
-    // SYSTEM PROMPT (CEREBRO SEGURO)
-    // =================================================================================
-    // 🛡️ NO INYECTAMOS data.telefonoAdmin AQUÍ
-    const contactoPublico = data.telefonoAtencion ? data.telefonoAtencion : "Solicitar contacto por este chat";
+        const datosContacto = `Pagos: ${data.mediosPago?.join(", ") || "A convenir"}. Soporte: ${data.telefonoAtencion || "N/A"}.`;
+        const instruccionesPago = data.instruccionesPago ? `Pago: ${data.instruccionesPago}` : "";
 
-    const systemPrompt = `
-    ERES EL ASISTENTE INTELIGENTE DE "${data.nombre}".
-    ${tono} ${reglaConcisa} ${extraInstructions}
+        const systemPrompt = `Asistente virtual de "${data.nombre}". 
+${tono}
+${extraInstructions}${temasProhibidos}${manejoClientesDificiles}
 
-    --- 🤝 FASE 0: CONEXIÓN ---
-    Si el usuario saluda y NO sabes su nombre: SALUDA Y PREGUNTA SU NOMBRE AMABLEMENTE antes de vender.
+REGLAS:
+- Maximo 30 palabras. Cero emojis. Una pregunta por mensaje.
+- No uses corchetes []. No pidas datos personales.
+- No digas "estoy aqui para ayudarte" ni frases de relleno.
+- SIEMPRE se amable, calido y con buena actitud.
 
-    ${logicaCampanas}
+NOMBRE: Si no sabes el nombre del cliente, pidelo antes de cualquier cosa.
 
-    --- 📉 NIVEL DE PRESIÓN: BAJO ---
-    NO INTENTES CERRAR LA VENTA EN CADA MENSAJE.
-    - Si acabas de dar información, pregunta: "¿Tienes alguna duda sobre esto?".
-    - NO preguntes "¿Quieres comprarlo ya?" a menos que el cliente muestre señales claras.
+CONTEXTO: Entiende TODA la conversacion. Si el cliente dijo que vende gorras y necesita una web, recuerdalo y usa esa info para recomendar el producto correcto. Si pregunta "¿tienen pagina web?", entiende que esta preguntando si tu empresa ofrece ese servicio, no si la empresa tiene pagina web propia.
 
-    --- ⛔ PROHIBICIONES ESTRICTAS ---
-    1. ANTI-ALUCINACIÓN: Solo vendes lo del CATÁLOGO abajo.
-    2. ANTI-CONTRADICCIÓN CITAS: ${prohibicionCitas}
-    3. PROHIBIDO COMPARTIR NÚMEROS PRIVADOS. SOLO SOPORTE.
+COMO LEER EL CATALOGO:
+- "=== CATEGORIA ===" es un agrupador, NO un producto.
+- "PRODUCTO:" es lo que realmente vendes.
+- Cuando pregunten "que tienes?", nombra PRODUCTOS, no categorias.
+- NUNCA presentes la categoria como si fuera el producto.
 
-    --- 🚦 SEMÁFORO DE ACCIÓN (CUÁNDO LLAMAR AL HUMANO) ---
-    
-    🔴 LUZ ROJA (¡PROHIBIDO LLAMAR AL HUMANO!):
-    - Cliente: "Quiero ver trabajos/ejemplos" -> TÚ MANDAS LOS LINKS.
-    - Cliente: "¿Precio?" -> TÚ RESPONDES CON EL CATÁLOGO.
-    >>> EN ESTOS CASOS: Responde tú. NO uses la herramienta "notificar_pedido".
+REGLA DE VARIANTES:
+- Si el producto tiene "GRUPOS DE VARIANTES", mencionalos al presentarlo.
+- NO listes opciones especificas hasta que el cliente pregunte por ese grupo.
 
-    🟢 LUZ VERDE (SÍ LLAMAR AL HUMANO):
-    1. CLIENTE PIDE AYUDA: "Necesito un asesor", "Agéndame".
-    2. CLIENTE CONFIRMA COMPRA: "Quiero comprar", "Manda cuenta", "Pagar ya".
+CATALOGO (UNICA fuente de verdad):
+${catalogoTxt}
 
-    --- 📚 INFORMACIÓN ---
-    CATÁLOGO:
-    ${catalogoTxt}
+PROHIBIDO INVENTAR: Solo existen los productos listados. Si no esta en el catalogo, di "eso no lo manejamos".
+PRECIOS: Solo cuando pregunten. Despues de dar precio, guia al cierre.
 
-    PORTAFOLIO (Solo mostrar):
-    ${identidadDigitalTxt}
+${instruccionesFotos}
 
-    DATOS:
-    📅 CITAS: ${politicaCitas}
-    💰 PAGOS: ${metodosPagoTxt}
-    ❓ FAQS: ${faqsTxt}
-    📞 CONTACTO SOPORTE: ${contactoPublico}
+PORTAFOLIO: Si preguntan por disenos, trabajos, portafolio o ejemplos, comparte redes.
+${redesTxt || "No hay redes."}
+No compartas redes fuera de ese contexto.
 
-    ${data.mensajeBienvenida ? `Saludo inicial: "${data.mensajeBienvenida}"` : ""}
-    `;
+${politicaReservas}
+${horariosTxt}
+${logicaCampanas}
+${logicaPromociones}
+${logicaFaqs}
+${terminosCondiciones}
 
-    // --- GUARDADO ---
-    const idEmpresaLimpio = data.telefonoTwilio.replace('whatsapp:', '').replace(/[^0-9+]/g, '');
+CONTEXTO NEGOCIO: ${data.descripcion || "Sin descripcion."} Industria: ${data.sector || "General"}
 
-    await db.collection('empresas').doc(idEmpresaLimpio).set({
-      ...data,
-      systemPrompt, 
-      telefonoTwilio: `whatsapp:${idEmpresaLimpio}`,
-      telefonoAdmin: data.telefonoAdmin.replace(/\s+/g, ''),
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+VENTAS: Cuando quiera comprar, llama notificar_pedido_completo. No preguntes mas.
+${datosContacto} ${instruccionesPago}`;
 
-    await db.collection('numeros_disponibles').doc(data.telefonoTwilio).update({
-        asignado: true,
-        empresaAsignada: data.nombre,
-        fechaAsignacion: admin.firestore.FieldValue.serverTimestamp()
-    });
+        // GUARDAR EN FIRESTORE
+        const idEmpresaLimpio = data.telefonoTwilio.replace('whatsapp:', '').replace(/[^0-9+]/g, '');
+        const objetoFinal = JSON.parse(JSON.stringify({
+            ...data,
+            catalogo: catalogoLimpio,
+            systemPrompt,
+            telefonoTwilio: `whatsapp:${idEmpresaLimpio}`,
+            telefonoAdmin: String(data.telefonoAdmin || "").replace(/\s+/g, ''),
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }));
 
-    return NextResponse.json({ success: true });
+        await db.collection('empresas').doc(idEmpresaLimpio).set(objetoFinal);
 
-  } catch (error) {
-    console.error(error);
-    return NextResponse.json({ error: "Error interno" }, { status: 500 });
-  }
+        // ✅ FIX: Usar set con merge en lugar de update
+        // Así no falla si el documento no existe en numeros_disponibles
+        try {
+            await db.collection('numeros_disponibles').doc(data.telefonoTwilio).set({
+                asignado: true,
+                empresaAsignada: data.nombre,
+                fechaAsignacion: admin.firestore.FieldValue.serverTimestamp(),
+                numero: data.telefonoTwilio,
+            }, { merge: true });
+        } catch (e: any) {
+            // No crítico: si falla, la empresa igual se guardó
+            console.warn("[EMPRESA] numeros_disponibles no actualizado:", e.message);
+        }
+
+        return NextResponse.json({ success: true });
+    } catch (error) {
+        console.error("ERROR POST EMPRESA:", error);
+        return NextResponse.json({ error: "Error interno" }, { status: 500 });
+    }
 }

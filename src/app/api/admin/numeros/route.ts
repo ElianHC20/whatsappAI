@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
+import { db } from '@/lib/firebaseAdmin';
 
 // 1. GET: Para ver la lista de todos tus números (Ocupados y Libres)
 export async function GET() {
