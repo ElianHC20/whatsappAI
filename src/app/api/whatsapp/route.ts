@@ -203,15 +203,13 @@ function buscarFotoEnCatalogo(catalogo: any[], texto: string): string | null {
 
 function esIntencionCompra(msg: string): boolean {
     const limpio = msg.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    // Solo frases que indican compra CONFIRMADA, no simple interés
     const frases = [
-        "quiero comprar","la quiero","lo quiero","las quiero","los quiero",
-        "me la llevo","me lo llevo","me las llevo","me los llevo",
-        "si quiero","si la quiero","si lo quiero","quiero las dos","quiero los dos",
-        "quiero ambas","quiero ambos","como la pido","como lo pido","como pido",
-        "va la llevo","dale la compro","si la compro","si lo compro",
+        "quiero comprar","me la llevo","me lo llevo","me las llevo","me los llevo",
+        "si quiero comprarlo","si quiero comprarla","dale la compro","si la compro","si lo compro",
         "quiero pedir","quiero ordenar","la pido","lo pido",
-        "estoy interesado","listo procedemos","dale procedemos","si procedemos",
-        "quiero proceder","si quiero proceder"
+        "listo procedemos","dale procedemos","si procedemos",
+        "quiero proceder","si quiero proceder","como la pido","como lo pido","como pido"
     ];
     return frases.some(f => limpio.includes(f));
 }
@@ -848,8 +846,16 @@ RECORDATORIO:
         };
 
         // notificarVenta: activa modo humano Y guarda en colección ventas
-        const notificarVenta = async (resumen: string, total: string) => {
-            const msgCliente = `Listo! Tu pedido quedo registrado: ${resumen} por ${total}. Un asesor te contactara pronto para confirmar los detalles.`;
+const notificarVenta = async (resumen: string, total: string) => {
+    // Validar que el resumen tenga un producto real antes de confirmar
+    if (!resumen || resumen === "Producto por confirmar") {
+        const txt = await respuestaTextoRecovery(systemPrompt, historial, body,
+            "El cliente mostró interés pero no confirmó qué producto quiere comprar. Pregúntale puntualmente qué producto desea.", adminIdRaw);
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, body, txt, profileName, false, false);
+        return;
+    }
+    const msgCliente = `Listo! Tu pedido quedo registrado: ${resumen} por ${total}. Un asesor te contactara pronto para confirmar los detalles.`;
             await twilioClient.messages.create({ from: to, to: from, body: msgCliente });
             await notificarAdmin(`🎉 NUEVA VENTA!\nCliente: ${profileName}\nPedido: ${resumen}\nTotal: ${total}\nTel: ${clienteId}`);
 
@@ -991,12 +997,23 @@ if (mediaUrl0 && numMedia > 0) {
                     || fechaHoraArgs.includes("confirmar") || fechaHoraArgs.includes("por definir")
                     || fechaHoraArgs.includes("fecha y hora") || fechaHoraArgs.length < 5;
 
-                if (fechaInvalida && !tieneFechaYHora(todosLosMsgs)) {
-                    const txt = "Genial! Para agendar tu reserva, que fecha te queda bien?";
-                    await twilioClient.messages.create({ from: to, to: from, body: txt });
-                    await guardarHistorial(chatRef, body, txt, profileName, false, false);
-                    return NextResponse.json({ success: true });
-                }
+if (fechaInvalida || !tieneFechaYHora(todosLosMsgs)) {
+    const hayFecha = /\d{1,2}\s*(de\s*)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|\d{1,2}[\/\-]\d{1,2}|(lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|hoy)/.test(todosLosMsgs.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+    const hayHora = /\d{1,2}\s*(:|\s)?\s*\d{0,2}\s*(am|pm|a\.m|p\.m)|a\s*las\s*\d{1,2}|\d{1,2}\s*:\s*\d{2}/.test(todosLosMsgs.toLowerCase());
+
+    if (!hayFecha) {
+        const txt = "Para agendar, que fecha te queda bien?";
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, body, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+    if (!hayHora) {
+        const txt = "Perfecto! Y a que hora te queda bien?";
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, body, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+}
 
                 const msg = `Reserva registrada: ${args.servicio} para ${args.fecha_hora_tentativa}. Te confirmaremos pronto.`;
                 await twilioClient.messages.create({ from: to, to: from, body: msg });
