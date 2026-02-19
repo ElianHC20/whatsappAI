@@ -434,9 +434,45 @@ export async function POST(req: NextRequest) {
         const mediaUrl0 = formData.get('MediaUrl0') as string | null;
 const mediaType0 = formData.get('MediaContentType0') as string | null;
 const numMedia = parseInt(formData.get('NumMedia') as string || '0');
-        const profileName = formData.get('ProfileName') as string;
+const profileName = formData.get('ProfileName') as string;
 
-        console.log(`[IN] ${profileName}: "${body}"`);
+// Transcribir audio si viene uno
+let bodyFinal = body || '';
+let eraAudio = false;
+
+if (numMedia > 0 && mediaUrl0 && mediaType0?.startsWith('audio/')) {
+    eraAudio = true;
+    console.log("[AUDIO] Transcribiendo...");
+    const transcripcion = await transcribirAudio(mediaUrl0);
+    if (transcripcion) {
+        bodyFinal = transcripcion;
+        console.log("[AUDIO] Transcrito:", transcripcion);
+    } else {
+        // No se pudo transcribir, pedirle que escriba
+        const chatRefTemp = db.collection('empresas').doc(
+            (formData.get('To') as string).replace('whatsapp:', '').replace(/\s+/g, '')
+        ).collection('chats').doc(
+            (formData.get('From') as string).replace('whatsapp:', '').replace(/\s+/g, '')
+        );
+        const txt = "No pude escuchar bien tu audio. Puedes escribirlo?";
+        try {
+            await twilioClient.messages.create({ from: formData.get('To') as string, to: formData.get('From') as string, body: txt });
+            await chatRefTemp.set({
+                profileName,
+                messages: admin.firestore.FieldValue.arrayUnion(
+                    { role: 'user', content: '[Audio no transcrito]', mediaUrl: mediaUrl0, mediaType: mediaType0, timestamp: new Date().toISOString() },
+                    { role: 'assistant', content: txt, timestamp: new Date().toISOString() }
+                ),
+                lastMsg: txt,
+                lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+                unread: true,
+            }, { merge: true });
+        } catch (e) {}
+        return NextResponse.json({ success: true });
+    }
+}
+
+console.log(`[IN] ${profileName}: "${bodyFinal}" ${eraAudio ? '(via audio)' : ''}`);
         if (!from || !to) return NextResponse.json({ error: "Faltan campos" }, { status: 400 });
 
         const botId = to.replace('whatsapp:', '').replace(/\s+/g, '');
@@ -618,11 +654,13 @@ ${resumenChats}`;
                     modoHumanoActivo = false;
                 }
             }
-            if (modoHumanoActivo) {
-                console.log("[HUMANO ACTIVO] Guardando msg sin responder");
-                await chatRef.set({
-                    profileName,
-                    messages: admin.firestore.FieldValue.arrayUnion({ role: 'user', content: body, timestamp: new Date().toISOString() }),
+if (modoHumanoActivo) {
+    console.log("[HUMANO ACTIVO] Guardando msg sin responder");
+    const msgHumano: any = { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() };
+    if (eraAudio && mediaUrl0) { msgHumano.mediaUrl = mediaUrl0; msgHumano.mediaType = mediaType0; }
+    await chatRef.set({
+        profileName,
+        messages: admin.firestore.FieldValue.arrayUnion(msgHumano),
                     lastMsg: body, lastUpdate: admin.firestore.FieldValue.serverTimestamp(), unread: true
                 }, { merge: true });
                 return NextResponse.json({ success: true });
@@ -738,14 +776,14 @@ if (ventaConfirmada) {            console.log("[VENTA PREVIA] Chat tiene venta c
         // ==========================================
         // DETECCION ANTICIPADA DE FOTO
         // ==========================================
-        const todosTextos = [...historial.map((m: any) => m.content), body].join(" ");
+const todosTextos = [...historial.map((m: any) => m.content), bodyFinal].join(" ");
         const productoActual = obtenerProductoDelContexto(todosTextos, catalogo);
         const productoActualTieneFoto = productoActual ? itemTieneFoto(productoActual) : null;
 
         console.log("[PRE-IA] Producto en contexto:", productoActual?.nombre || "ninguno");
         console.log("[PRE-IA] Tiene foto:", productoActualTieneFoto);
 
-        const clientePidioFoto = clientePideFotoExplicita(body);
+const clientePidioFoto = clientePideFotoExplicita(bodyFinal);
         console.log("[PRE-IA] Cliente pidio foto:", clientePidioFoto);
 
         let instruccionFotoExtra = "";
@@ -776,7 +814,7 @@ RECORDATORIO:
 - NUNCA inventes productos ni opciones.
 - Recuerda toda la conversacion: si el cliente ya dio contexto (su negocio, necesidades), usalo.`
             },
-            { role: "user", content: body }
+{ role: "user", content: bodyFinal }
         ];
 
         const toolsDisponibles: any[] = [
@@ -1059,8 +1097,21 @@ if (fechaInvalida || !tieneFechaYHora(todosLosMsgs)) {
             }
 
             await twilioClient.messages.create({ from: to, to: from, body: textoRespuesta });
-            await guardarHistorial(chatRef, body, textoRespuesta, profileName, false, false);
-        }
+// Guardar con mediaUrl si era audio
+const msgUsuarioParaGuardar = eraAudio
+    ? { role: 'user', content: bodyFinal, mediaUrl: mediaUrl0, mediaType: mediaType0, timestamp: new Date().toISOString() }
+    : { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() };
+
+await chatRef.set({
+    profileName,
+    messages: admin.firestore.FieldValue.arrayUnion(
+        msgUsuarioParaGuardar,
+        { role: 'assistant', content: textoRespuesta, timestamp: new Date().toISOString() }
+    ),
+    lastMsg: textoRespuesta,
+    lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+    unread: true,
+}, { merge: true });        }
 
         console.log("========== FIN ==========\n");
         return NextResponse.json({ success: true });
@@ -1081,4 +1132,39 @@ async function guardarHistorial(chatRef: any, userMsg: string, botMsg: string, p
         modo_humano: modoHumano,
         unread: true
     }, { merge: true });
+}
+
+async function transcribirAudio(mediaUrl: string): Promise<string | null> {
+    try {
+        // Descargar el audio con credenciales de Twilio
+        const authHeader = 'Basic ' + Buffer.from(
+            `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+        ).toString('base64');
+
+        const audioRes = await fetch(mediaUrl, { headers: { Authorization: authHeader } });
+        if (!audioRes.ok) return null;
+
+        const buffer = await audioRes.arrayBuffer();
+        const audioBuffer = Buffer.from(buffer);
+
+        // Enviar a Whisper de OpenAI
+        const formData = new FormData();
+        const blob = new Blob([audioBuffer], { type: 'audio/ogg' });
+        formData.append('file', blob, 'audio.ogg');
+        formData.append('model', 'whisper-1');
+        formData.append('language', 'es');
+
+        const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+            body: formData,
+        });
+
+        if (!whisperRes.ok) return null;
+        const data = await whisperRes.json();
+        return data.text || null;
+    } catch (e) {
+        console.error("[AUDIO] Error transcribiendo:", e);
+        return null;
+    }
 }
