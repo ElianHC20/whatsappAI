@@ -727,8 +727,8 @@ ${resumenChats}`;
         // ==========================================
         // INTERCEPTOR VENTA: Si ya hubo venta, solo guarda
         // ==========================================
-        if (yaHuboVentaEnHistorial(historial)) {
-            console.log("[VENTA PREVIA] Chat tiene venta confirmada, guardando sin responder");
+const ventaConfirmada = chatDoc.data()?.ventaConfirmada === true;
+if (ventaConfirmada) {            console.log("[VENTA PREVIA] Chat tiene venta confirmada, guardando sin responder");
             await chatRef.set({
                 profileName,
                 messages: admin.firestore.FieldValue.arrayUnion({ role: 'user', content: body, timestamp: new Date().toISOString() }),

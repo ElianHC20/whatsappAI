@@ -45,10 +45,14 @@ export async function POST(req: NextRequest) {
         const chatRef = db.collection('empresas').doc(botIdLimpio).collection('chats').doc(chatIdLimpio);
 
         // A. REACTIVAR BOT
-        if (accion === 'reactivar_bot') {
-            await chatRef.update({ modo_humano: false });
-            return NextResponse.json({ success: true });
-        }
+     if (accion === 'reactivar_bot') {
+    await chatRef.update({ 
+        modo_humano: false,
+        ventaConfirmada: false,
+        modo_humano_manual: false,
+    });
+    return NextResponse.json({ success: true });
+}
 
         // B. SOLO SILENCIAR (Botón Rojo)
         if (accion === 'activar_humano') {
