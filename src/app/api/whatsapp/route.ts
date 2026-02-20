@@ -418,6 +418,212 @@ function analizarComportamientoCliente(messages: any[]): string {
     return comportamiento.trim();
 }
 
+
+// ============================================
+// HELPERS DE RESERVAS
+// ============================================
+
+function parsearFechaHora(texto: string): { fecha: Date | null, textoFecha: string, textoHora: string } {
+    const limpio = texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const ahora = new Date();
+    
+    let fecha: Date | null = null;
+    let textoFecha = "";
+    let textoHora = "";
+
+    // Días de la semana
+    const diasSemana: Record<string, number> = {
+        'lunes': 1, 'martes': 2, 'miercoles': 3, 'jueves': 4,
+        'viernes': 5, 'sabado': 6, 'domingo': 0
+    };
+    const meses: Record<string, number> = {
+        'enero': 0, 'febrero': 1, 'marzo': 2, 'abril': 3, 'mayo': 4, 'junio': 5,
+        'julio': 6, 'agosto': 7, 'septiembre': 8, 'octubre': 9, 'noviembre': 10, 'diciembre': 11
+    };
+
+    // "hoy"
+    if (/\bhoy\b/.test(limpio)) {
+        fecha = new Date(ahora);
+        textoFecha = "hoy";
+    }
+    // "mañana"
+    else if (/\bmanana\b/.test(limpio)) {
+        fecha = new Date(ahora);
+        fecha.setDate(fecha.getDate() + 1);
+        textoFecha = "mañana";
+    }
+    // "pasado mañana"
+    else if (/pasado\s*manana/.test(limpio)) {
+        fecha = new Date(ahora);
+        fecha.setDate(fecha.getDate() + 2);
+        textoFecha = "pasado mañana";
+    }
+    // "este/el/próximo [día]"
+    else {
+        for (const [nombre, num] of Object.entries(diasSemana)) {
+            if (limpio.includes(nombre)) {
+                const hoy = ahora.getDay();
+                let diff = num - hoy;
+                if (diff <= 0) diff += 7; // próximo
+                if (limpio.includes('proximo') || limpio.includes('siguiente')) diff += 7;
+                fecha = new Date(ahora);
+                fecha.setDate(fecha.getDate() + diff);
+                textoFecha = nombre.charAt(0).toUpperCase() + nombre.slice(1);
+                break;
+            }
+        }
+    }
+
+    // "DD de [mes]" o "DD/MM" o "DD-MM"
+    if (!fecha) {
+        const matchMes = limpio.match(/(\d{1,2})\s*(?:de\s*)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)/);
+        if (matchMes) {
+            const dia = parseInt(matchMes[1]);
+            const mes = meses[matchMes[2]];
+            fecha = new Date(ahora.getFullYear(), mes, dia);
+            if (fecha < ahora) fecha.setFullYear(fecha.getFullYear() + 1);
+            textoFecha = `${String(dia).padStart(2,'0')}/${String(mes+1).padStart(2,'0')}`;
+        }
+
+        const matchSlash = limpio.match(/(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/);
+        if (!fecha && matchSlash) {
+            const dia = parseInt(matchSlash[1]);
+            const mes = parseInt(matchSlash[2]) - 1;
+            const anio = matchSlash[3] ? parseInt(matchSlash[3]) : ahora.getFullYear();
+            fecha = new Date(anio < 100 ? 2000 + anio : anio, mes, dia);
+            textoFecha = `${String(dia).padStart(2,'0')}/${String(mes+1).padStart(2,'0')}`;
+        }
+    }
+
+    // Extraer hora
+    // "a las X", "X am/pm", "X:XX"
+    const matchHora = limpio.match(/(?:a\s*las?\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m|p\.m)?/);
+    if (matchHora) {
+        let h = parseInt(matchHora[1]);
+        const m = matchHora[2] ? parseInt(matchHora[2]) : 0;
+        const periodo = matchHora[3] || "";
+        if (periodo.includes('pm') && h < 12) h += 12;
+        if (periodo.includes('am') && h === 12) h = 0;
+        // Asumir PM si h < 7 y no se especificó
+        if (!periodo && h > 0 && h < 7) h += 12;
+        textoHora = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+        if (fecha) {
+            fecha.setHours(h, m, 0, 0);
+        }
+    }
+
+    return { fecha, textoFecha, textoHora };
+}
+
+function formatearFechaConfirmacion(fecha: Date): string {
+    const dia = String(fecha.getDate()).padStart(2, '0');
+    const mes = String(fecha.getMonth() + 1).padStart(2, '0');
+    const anio = fecha.getFullYear();
+    const horas = String(fecha.getHours()).padStart(2, '0');
+    const minutos = String(fecha.getMinutes()).padStart(2, '0');
+    return `${dia}/${mes}/${anio} - ${horas}:${minutos}`;
+}
+
+function getDiaSemana(fecha: Date): string {
+    const dias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+    return dias[fecha.getDay()];
+}
+
+async function verificarDisponibilidadPersona(
+    empresaRef: any,
+    persona: any,
+    fecha: Date,
+    duracionMinutos: number,
+    duracionSlot: number
+): Promise<boolean> {
+    const diaSemana = getDiaSemana(fecha);
+    
+    // Verificar si trabaja ese día
+    if (!persona.diasTrabaja.includes(diaSemana)) return false;
+
+    const horaSlot = fecha.getHours() * 60 + fecha.getMinutes();
+    const horaInicio = parseInt(persona.horaInicio.split(':')[0]) * 60 + parseInt(persona.horaInicio.split(':')[1]);
+    const horaFin = parseInt(persona.horaFin.split(':')[0]) * 60 + parseInt(persona.horaFin.split(':')[1]);
+
+    // Verificar horario laboral
+    if (horaSlot < horaInicio || horaSlot + duracionMinutos > horaFin) return false;
+
+    // Verificar breaks
+    for (const br of (persona.breaks || [])) {
+        const brIni = parseInt(br.inicio.split(':')[0]) * 60 + parseInt(br.inicio.split(':')[1]);
+        const brFin = parseInt(br.fin.split(':')[0]) * 60 + parseInt(br.fin.split(':')[1]);
+        if (horaSlot < brFin && horaSlot + duracionMinutos > brIni) return false;
+    }
+
+    // Verificar reservas existentes en Firebase
+    const fechaInicio = new Date(fecha);
+    fechaInicio.setHours(0, 0, 0, 0);
+    const fechaFin = new Date(fecha);
+    fechaFin.setHours(23, 59, 59, 999);
+
+    try {
+        const reservasSnap = await empresaRef.collection('ventas').get();
+        for (const doc of reservasSnap.docs) {
+            const v = doc.data();
+            if (v.tipo !== 'reserva') continue;
+            if (v.estado === 'cancelada') continue;
+            if (v.personaAsignada !== persona.nombre) continue;
+            
+            const fechaReserva = v.fechaReserva ? new Date(v.fechaReserva) : null;
+            if (!fechaReserva) continue;
+
+            const rInicio = fechaReserva.getHours() * 60 + fechaReserva.getMinutes();
+            const rFin = rInicio + (v.duracionMinutos || duracionMinutos);
+
+            // Conflicto de solapamiento
+            if (horaSlot < rFin && horaSlot + duracionMinutos > rInicio) return false;
+        }
+    } catch (e) {
+        console.error("[DISPONIBILIDAD] Error verificando reservas:", e);
+    }
+
+    return true;
+}
+
+async function guardarReservaFirestore(
+    empresaRef: any,
+    clienteId: string,
+    profileName: string,
+    servicio: string,
+    persona: string,
+    fecha: Date,
+    duracionMinutos: number
+) {
+    await empresaRef.collection('ventas').add({
+        tipo: 'reserva',
+        clienteId,
+        clienteNombre: profileName,
+        resumen: `Reserva: ${servicio}`,
+        servicio,
+        personaAsignada: persona,
+        fechaReserva: fecha.toISOString(),
+        duracionMinutos,
+        total: 'Por confirmar',
+        estado: 'pendiente',
+        fecha: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: new Date().toISOString(),
+    });
+}
+
+function clienteConfirmaReserva(msg: string): boolean {
+    const limpio = msg.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const frases = [
+        'si', 'sí', 'dale', 'listo', 'claro', 'perfecto', 'de una', 'ok', 'okay',
+        'quiero', 'hagamos', 'va', 'bueno', 'si quiero', 'si por favor', 'si porfa',
+        'quiero hacer la reserva', 'quiero reservar', 'si reserva', 'adelante'
+    ];
+    // Solo match exacto o al inicio/fin para evitar falsos positivos
+    return frases.some(f => {
+        const regex = new RegExp(`(^|\\s)${f}(\\s|$|[.,!?])`);
+        return regex.test(limpio) || limpio === f;
+    });
+}
+
 // ============================================
 // WEBHOOK PRINCIPAL
 // ============================================
@@ -763,6 +969,180 @@ if (mediaUrl0 && numMedia > 0) {
             return NextResponse.json({ success: true });
         }
 
+// ==========================================
+// INTERCEPTOR RESERVA: Si hay flujo activo, manejarlo directo
+// ==========================================
+const estadoReservaActivo = chatDoc.exists ? chatDoc.data()?.estadoReserva : null;
+if (estadoReservaActivo) {
+    console.log("[RESERVA] Estado activo:", estadoReservaActivo);
+    const chatData = chatDoc.data() || {};
+    const duracionSlot = empresaData?.duracionSlot || 30;
+
+    // Recuperar producto del estado guardado
+    let productoReserva: any = null;
+    if (chatData.reservaServicio) {
+        for (const cat of catalogo) {
+            for (const item of (cat.items || [])) {
+                if (normalizarTexto(item.nombre || "") === normalizarTexto(chatData.reservaServicio)) {
+                    productoReserva = item;
+                }
+            }
+        }
+    }
+    const duracionMinutos = productoReserva ? (parseInt(productoReserva.duracion) || duracionSlot) : duracionSlot;
+    const todasPersonas: any[] = empresaData?.personasDisponibles || [];
+    const personasDelProducto = productoReserva?.personasAsignadas?.length > 0
+        ? todasPersonas.filter((p: any) => productoReserva.personasAsignadas.includes(p.nombre))
+        : todasPersonas;
+
+    const notificarAdmin = async (texto: string) => {
+        if (!adminIdRaw) return;
+        try { await twilioClient.messages.create({ from: to, to: `whatsapp:+${adminIdRaw}`, body: texto }); }
+        catch (e) { try { await twilioClient.messages.create({ from: to, to: `whatsapp:${adminIdRaw}`, body: texto }); } catch (e2) { } }
+    };
+
+    // ESTADO: esperando_confirmacion
+    if (estadoReservaActivo === 'esperando_confirmacion') {
+        if (!clienteConfirmaReserva(bodyFinal)) {
+            await chatRef.update({ estadoReserva: admin.firestore.FieldValue.delete() });
+            const txt = "Sin problema! En que mas te puedo ayudar?";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        await chatRef.update({ estadoReserva: 'esperando_fecha' });
+        const txt = "Perfecto! Para que fecha quieres la cita?";
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // ESTADO: esperando_fecha
+    if (estadoReservaActivo === 'esperando_fecha') {
+        const { fecha, textoFecha } = parsearFechaHora(bodyFinal);
+        if (!fecha || !textoFecha) {
+            const txt = "No entendi bien la fecha. Puedes decirme algo como 'el martes', '25 de marzo' o '25/03'?";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        await chatRef.update({ estadoReserva: 'esperando_hora', reservaFecha: fecha.toISOString(), reservaFechaTexto: textoFecha });
+        const txt = `${textoFecha}! Y a que hora te queda bien?`;
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // ESTADO: esperando_hora
+    if (estadoReservaActivo === 'esperando_hora') {
+        const { textoHora } = parsearFechaHora(bodyFinal);
+        if (!textoHora) {
+            const txt = "No entendi la hora. Puedes decirme algo como '3pm', '15:00' o 'a las 4'?";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        const fechaGuardada = chatData.reservaFecha ? new Date(chatData.reservaFecha) : new Date();
+        const [hh, mm] = textoHora.split(':').map(Number);
+        fechaGuardada.setHours(hh, mm, 0, 0);
+        const fechaFormateada = formatearFechaConfirmacion(fechaGuardada);
+
+        const personasLibres: any[] = [];
+        for (const persona of personasDelProducto) {
+            const libre = await verificarDisponibilidadPersona(empresaRef, persona, fechaGuardada, duracionMinutos, duracionSlot);
+            if (libre) personasLibres.push(persona);
+        }
+
+        if (personasLibres.length === 0) {
+            await chatRef.update({ estadoReserva: 'esperando_fecha', reservaFecha: admin.firestore.FieldValue.delete() });
+            const txt = `${fechaFormateada} no tenemos disponibilidad. Puedes elegir otra fecha?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+
+        await chatRef.update({ reservaFecha: fechaGuardada.toISOString(), reservaPersonasDisponibles: personasLibres.map((p: any) => p.nombre), reservaFechaFormateada: fechaFormateada });
+
+        if (personasLibres.length === 1) {
+            await chatRef.update({ estadoReserva: 'esperando_confirmacion_final', reservaPersonaElegida: personasLibres[0].nombre });
+            const txt = `${fechaFormateada} estara disponible ${personasLibres[0].nombre}. Confirmamos?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        } else {
+            const nombres = personasLibres.map((p: any) => p.nombre).join(', ');
+            await chatRef.update({ estadoReserva: 'esperando_persona' });
+            const txt = `${fechaFormateada}. Tenemos disponibles: ${nombres}. Con quien prefieres? O dime "cualquiera" y yo asigno.`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        }
+        return NextResponse.json({ success: true });
+    }
+
+    // ESTADO: esperando_persona
+    if (estadoReservaActivo === 'esperando_persona') {
+        const personasDisp: string[] = chatData.reservaPersonasDisponibles || [];
+        const fechaFormateada = chatData.reservaFechaFormateada || '';
+        let personaElegida = "";
+        const limpioMsg = normalizarTexto(bodyFinal);
+        if (limpioMsg.includes('cualquiera') || limpioMsg.includes('cualquier') || limpioMsg.includes('da igual') || limpioMsg.includes('no importa')) {
+            personaElegida = personasDisp[0];
+        } else {
+            for (const nombre of personasDisp) {
+                if (limpioMsg.includes(normalizarTexto(nombre))) { personaElegida = nombre; break; }
+            }
+        }
+        if (!personaElegida) {
+            const txt = `No entendi. Tienes disponibles: ${personasDisp.join(', ')}. Con quien prefieres?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        await chatRef.update({ estadoReserva: 'esperando_confirmacion_final', reservaPersonaElegida: personaElegida });
+        const txt = `${fechaFormateada} con ${personaElegida}. Confirmamos la reserva?`;
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // ESTADO: esperando_confirmacion_final
+    if (estadoReservaActivo === 'esperando_confirmacion_final') {
+        if (!clienteConfirmaReserva(bodyFinal)) {
+            await chatRef.update({ estadoReserva: admin.firestore.FieldValue.delete() });
+            const txt = "Sin problema. Si quieres otra fecha o algo mas, aqui estoy.";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        const fechaReserva = chatData.reservaFecha ? new Date(chatData.reservaFecha) : new Date();
+        const personaAsignada = chatData.reservaPersonaElegida || '';
+        const servicioNombre = chatData.reservaServicio || '';
+        const fechaFormateada = chatData.reservaFechaFormateada || formatearFechaConfirmacion(fechaReserva);
+
+        await guardarReservaFirestore(empresaRef, clienteId, profileName, servicioNombre, personaAsignada, fechaReserva, duracionMinutos);
+
+        const msgCliente = `Listo! Reserva confirmada: ${servicioNombre} el ${fechaFormateada} con ${personaAsignada}. Un asistente te escribira pronto para confirmar todos los detalles.`;
+        await twilioClient.messages.create({ from: to, to: from, body: msgCliente });
+        await notificarAdmin(`📅 NUEVA RESERVA!\nCliente: ${profileName}\nServicio: ${servicioNombre}\nFecha: ${fechaFormateada}\nPersona: ${personaAsignada}\nTel: ${clienteId}`);
+
+        await chatRef.set({
+            profileName,
+            messages: admin.firestore.FieldValue.arrayUnion(
+                { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() },
+                { role: 'assistant', content: msgCliente, timestamp: new Date().toISOString() }
+            ),
+            lastMsg: msgCliente,
+            lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+            modo_humano: true,
+            modo_humano_manual: false,
+            unread: true,
+            estadoReserva: admin.firestore.FieldValue.delete(),
+            reservaConfirmada: true,
+        }, { merge: true });
+
+        return NextResponse.json({ success: true });
+    }
+}
+
         // ==========================================
         // INTERCEPTOR VENTA: Si ya hubo venta, solo guarda
         // ==========================================
@@ -1031,37 +1411,255 @@ if (mediaUrl0 && numMedia > 0) {
             }
 
             // NOTIFICAR RESERVA
-            if (name === "notificar_reserva") {
-                const todosLosMsgs = [...historial.map((m: any) => m.content), body].join(" ");
-                const fechaHoraArgs = (args.fecha_hora_tentativa || "").toLowerCase();
-                const fechaInvalida = !fechaHoraArgs || fechaHoraArgs.includes("pendiente")
-                    || fechaHoraArgs.includes("confirmar") || fechaHoraArgs.includes("por definir")
-                    || fechaHoraArgs.includes("fecha y hora") || fechaHoraArgs.length < 5;
+// NOTIFICAR RESERVA — Flujo completo con personas y slots
+if (name === "notificar_reserva") {
+    const chatData = chatDoc.exists ? chatDoc.data() : {};
+    const estadoReserva = chatData?.estadoReserva || null;
+    const todosLosMsgs = [...historial.map((m: any) => m.content), bodyFinal].join(" ");
 
-if (fechaInvalida || !tieneFechaYHora(todosLosMsgs)) {
-    const hayFecha = /\d{1,2}\s*(de\s*)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)|\d{1,2}[\/\-]\d{1,2}|(lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana|hoy)/.test(todosLosMsgs.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
-    const hayHora = /\d{1,2}\s*(:|\s)?\s*\d{0,2}\s*(am|pm|a\.m|p\.m)|a\s*las\s*\d{1,2}|\d{1,2}\s*:\s*\d{2}/.test(todosLosMsgs.toLowerCase());
-
-    if (!hayFecha) {
-        const txt = "Para agendar, que fecha te queda bien?";
-        await twilioClient.messages.create({ from: to, to: from, body: txt });
-        await guardarHistorial(chatRef, body, txt, profileName, false, false);
-        return NextResponse.json({ success: true });
-    }
-    if (!hayHora) {
-        const txt = "Perfecto! Y a que hora te queda bien?";
-        await twilioClient.messages.create({ from: to, to: from, body: txt });
-        await guardarHistorial(chatRef, body, txt, profileName, false, false);
-        return NextResponse.json({ success: true });
-    }
-}
-
-                const msg = `Reserva registrada: ${args.servicio} para ${args.fecha_hora_tentativa}. Te confirmaremos pronto.`;
-                await twilioClient.messages.create({ from: to, to: from, body: msg });
-                await notificarAdmin(`📅 NUEVA RESERVA!\nCliente: ${profileName}\nServicio: ${args.servicio}\nFecha: ${args.fecha_hora_tentativa}\nTel: ${clienteId}`);
-                await guardarHistorial(chatRef, body, msg, profileName, true, false);
-                return NextResponse.json({ success: true });
+    // Buscar el producto reservable en contexto
+    let productoReserva: any = null;
+    for (const cat of catalogo) {
+        for (const item of (cat.items || [])) {
+            if (item.requiereReserva && normalizarTexto(todosLosMsgs).includes(normalizarTexto(item.nombre || ""))) {
+                productoReserva = item;
+                break;
             }
+        }
+        if (productoReserva) break;
+    }
+    if (!productoReserva && chatData?.reservaServicio) {
+        // Recuperar de estado guardado
+        for (const cat of catalogo) {
+            for (const item of (cat.items || [])) {
+                if (normalizarTexto(item.nombre || "") === normalizarTexto(chatData.reservaServicio)) {
+                    productoReserva = item;
+                }
+            }
+        }
+    }
+
+    const duracionSlot = empresaData?.duracionSlot || 30;
+    const duracionMinutos = productoReserva ? (parseInt(productoReserva.duracion) || duracionSlot) : duracionSlot;
+
+    // Personas disponibles para este producto
+    const todasPersonas: any[] = empresaData?.personasDisponibles || [];
+    const personasDelProducto = productoReserva?.personasAsignadas?.length > 0
+        ? todasPersonas.filter((p: any) => productoReserva.personasAsignadas.includes(p.nombre))
+        : todasPersonas;
+
+    // ── ESTADO 1: Esperando confirmación del cliente ──
+    // El bot ya preguntó "¿quieres hacer la reserva?" y esperamos sí/no
+    if (estadoReserva === 'esperando_confirmacion') {
+        if (!clienteConfirmaReserva(bodyFinal)) {
+            // Cliente dijo que no o algo ambiguo
+            await chatRef.update({ estadoReserva: admin.firestore.FieldValue.delete() });
+            const txt = "Sin problema! En que mas te puedo ayudar?";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        // Confirmó! Pedir fecha
+        await chatRef.update({ 
+            estadoReserva: 'esperando_fecha',
+            reservaServicio: productoReserva?.nombre || args.servicio
+        });
+        const txt = `Perfecto! Para que fecha quieres la cita?`;
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // ── ESTADO 2: Esperando fecha ──
+    if (estadoReserva === 'esperando_fecha') {
+        const { fecha, textoFecha } = parsearFechaHora(bodyFinal);
+        if (!fecha || !textoFecha) {
+            const txt = "No entendi bien la fecha. Puedes decirme algo como 'el martes', '25 de marzo' o '25/03'?";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+        // Guardar fecha y pedir hora
+        await chatRef.update({ 
+            estadoReserva: 'esperando_hora',
+            reservaFecha: fecha.toISOString(),
+            reservaFechaTexto: textoFecha
+        });
+        const txt = `${textoFecha}! Y a que hora te queda bien?`;
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // ── ESTADO 3: Esperando hora ──
+    if (estadoReserva === 'esperando_hora') {
+        const { textoHora } = parsearFechaHora(bodyFinal);
+        if (!textoHora) {
+            const txt = "No entendi la hora. Puedes decirme algo como '3pm', '15:00' o 'a las 4'?";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+
+        // Reconstruir fecha completa
+        const fechaGuardada = chatData?.reservaFecha ? new Date(chatData.reservaFecha) : new Date();
+        const [hh, mm] = textoHora.split(':').map(Number);
+        fechaGuardada.setHours(hh, mm, 0, 0);
+
+        const fechaFormateada = formatearFechaConfirmacion(fechaGuardada);
+        
+        // Confirmar fecha+hora al cliente
+        await chatRef.update({
+            estadoReserva: 'esperando_persona',
+            reservaFecha: fechaGuardada.toISOString(),
+            reservaHoraTexto: textoHora
+        });
+
+        // Verificar personas disponibles para esa fecha/hora
+        const personasLibres: any[] = [];
+        for (const persona of personasDelProducto) {
+            const libre = await verificarDisponibilidadPersona(empresaRef, persona, fechaGuardada, duracionMinutos, duracionSlot);
+            if (libre) personasLibres.push(persona);
+        }
+
+        if (personasLibres.length === 0) {
+            // Nadie disponible, pedir nueva fecha
+            await chatRef.update({ 
+                estadoReserva: 'esperando_fecha',
+                reservaFecha: admin.firestore.FieldValue.delete()
+            });
+            const txt = `${fechaFormateada} no tenemos disponibilidad. Puedes elegir otra fecha?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+
+        await chatRef.update({ 
+            reservaPersonasDisponibles: personasLibres.map((p: any) => p.nombre),
+            reservaFechaFormateada: fechaFormateada
+        });
+
+        if (personasLibres.length === 1) {
+            // Solo una persona, confirmar directo
+            await chatRef.update({ 
+                estadoReserva: 'esperando_confirmacion_final',
+                reservaPersonaElegida: personasLibres[0].nombre
+            });
+            const txt = `${fechaFormateada} estara disponible ${personasLibres[0].nombre}. Confirmamos?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        } else {
+            // Varias personas disponibles
+            const nombres = personasLibres.map((p: any) => p.nombre).join(', ');
+            await chatRef.update({ estadoReserva: 'esperando_persona' });
+            const txt = `${fechaFormateada}. Tenemos disponibles: ${nombres}. Con quien prefieres? O dime "cualquiera" y yo asigno.`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        }
+        return NextResponse.json({ success: true });
+    }
+
+    // ── ESTADO 4: Esperando elección de persona ──
+    if (estadoReserva === 'esperando_persona') {
+        const personasDisp: string[] = chatData?.reservaPersonasDisponibles || [];
+        const fechaReserva = chatData?.reservaFecha ? new Date(chatData.reservaFecha) : null;
+        const fechaFormateada = chatData?.reservaFechaFormateada || '';
+        
+        let personaElegida = "";
+        const limpioMsg = normalizarTexto(bodyFinal);
+
+        if (limpioMsg.includes('cualquiera') || limpioMsg.includes('cualquier') || limpioMsg.includes('da igual') || limpioMsg.includes('no importa')) {
+            personaElegida = personasDisp[0]; // Asignar primera disponible
+        } else {
+            for (const nombre of personasDisp) {
+                if (limpioMsg.includes(normalizarTexto(nombre))) {
+                    personaElegida = nombre;
+                    break;
+                }
+            }
+        }
+
+        if (!personaElegida) {
+            const nombres = personasDisp.join(', ');
+            const txt = `No entendi. Tienes disponibles: ${nombres}. Con quien prefieres?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+
+        await chatRef.update({ 
+            estadoReserva: 'esperando_confirmacion_final',
+            reservaPersonaElegida: personaElegida
+        });
+        const txt = `${fechaFormateada} con ${personaElegida}. Confirmamos la reserva?`;
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // ── ESTADO 5: Confirmación final ──
+    if (estadoReserva === 'esperando_confirmacion_final') {
+        if (!clienteConfirmaReserva(bodyFinal)) {
+            await chatRef.update({ estadoReserva: admin.firestore.FieldValue.delete() });
+            const txt = "Sin problema. Si quieres otra fecha o algo mas, aqui estoy.";
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+            return NextResponse.json({ success: true });
+        }
+
+        // ✅ CONFIRMAR RESERVA
+        const fechaReserva = chatData?.reservaFecha ? new Date(chatData.reservaFecha) : new Date();
+        const personaAsignada = chatData?.reservaPersonaElegida || '';
+        const servicioNombre = chatData?.reservaServicio || args.servicio;
+        const fechaFormateada = chatData?.reservaFechaFormateada || formatearFechaConfirmacion(fechaReserva);
+
+        await guardarReservaFirestore(empresaRef, clienteId, profileName, servicioNombre, personaAsignada, fechaReserva, duracionMinutos);
+
+        const msgCliente = `Listo! Reserva confirmada: ${servicioNombre} el ${fechaFormateada} con ${personaAsignada}. Un asistente te escribira pronto para confirmar todos los detalles.`;
+        await twilioClient.messages.create({ from: to, to: from, body: msgCliente });
+        await notificarAdmin(`📅 NUEVA RESERVA!\nCliente: ${profileName}\nServicio: ${servicioNombre}\nFecha: ${fechaFormateada}\nPersona: ${personaAsignada}\nTel: ${clienteId}`);
+
+        // Activar modo humano igual que las ventas
+        await chatRef.set({
+            profileName,
+            messages: admin.firestore.FieldValue.arrayUnion(
+                { role: 'user', content: bodyFinal, timestamp: new Date().toISOString() },
+                { role: 'assistant', content: msgCliente, timestamp: new Date().toISOString() }
+            ),
+            lastMsg: msgCliente,
+            lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
+            modo_humano: true,
+            modo_humano_manual: false,
+            unread: true,
+            estadoReserva: admin.firestore.FieldValue.delete(),
+            reservaConfirmada: true,
+        }, { merge: true });
+
+        return NextResponse.json({ success: true });
+    }
+
+    // ── Sin estado previo: El bot quiere iniciar flujo ──
+    // Verificar que el cliente realmente quiso reservar (respuesta a pregunta puntual)
+    if (!clienteConfirmaReserva(bodyFinal)) {
+        // El bot llamó la tool pero el cliente no confirmó explícitamente
+        // Dejar que la IA responda normalmente
+        const txt = await respuestaTextoRecovery(systemPrompt, historial, bodyFinal,
+            "El cliente está preguntando sobre el servicio. Preséntalo y al final pregunta puntualmente: ¿Quieres hacer la reserva?", adminIdRaw);
+        await twilioClient.messages.create({ from: to, to: from, body: txt });
+        await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        return NextResponse.json({ success: true });
+    }
+
+    // Cliente confirmó que quiere reservar, iniciar flujo
+    await chatRef.update({ 
+        estadoReserva: 'esperando_fecha',
+        reservaServicio: productoReserva?.nombre || args.servicio
+    });
+    const txt = `Para que fecha quieres la cita?`;
+    await twilioClient.messages.create({ from: to, to: from, body: txt });
+    await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+    return NextResponse.json({ success: true });
+}
 
             // NOTIFICAR PEDIDO COMPLETO
             if (name === "notificar_pedido_completo") {

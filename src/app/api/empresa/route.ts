@@ -19,6 +19,8 @@ export async function GET(req: NextRequest) {
     }
 }
 
+
+
 export async function POST(req: NextRequest) {
     try {
         const rawData = await req.json();
@@ -150,11 +152,15 @@ export async function POST(req: NextRequest) {
 
         let politicaReservas = "";
         if (hayProductosConReserva) {
-            politicaReservas = `\nRESERVAS: Solo [REQUIERE RESERVA] se reservan.
-SIEMPRE pide FECHA y luego HORA antes de confirmar reserva.
-NUNCA llames notificar_reserva sin fecha y hora concretas.
-Metodo: ${data.metodoReserva || "WhatsApp"}.
-${data.reglasReserva ? `Reglas: ${data.reglasReserva}` : ""}`;
+politicaReservas = `\nRESERVAS: Solo productos [REQUIERE RESERVA] llevan flujo de reserva.
+FLUJO ESTRICTO:
+1. Presenta el servicio normalmente y resuelve dudas.
+2. Cuando el cliente muestre interés claro, pregunta UNA sola vez: "Quieres hacer la reserva?"
+3. SOLO llama notificar_reserva cuando el cliente responda SI a ESA pregunta puntual.
+4. NUNCA llames notificar_reserva si el cliente solo pregunta por el servicio, precio o disponibilidad.
+5. El sistema manejará el resto del flujo (fecha, hora, persona).
+Metodo: WhatsApp.
+${data.reglasReserva ? `Instrucciones del negocio para el bot: ${data.reglasReserva}` : ""}`;
         } else {
             politicaReservas = "\nNO hay reservas.";
         }
