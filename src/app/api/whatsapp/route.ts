@@ -1313,11 +1313,17 @@ const notificarVenta = async (resumen: string, total: string) => {
 
             // ENVIAR FOTO
             if (name === "enviar_foto") {
-                if (esIntencionCompra(body)) {
-                    const { resumen, total } = armarResumenCompra(catalogo, historial, body);
-                    await notificarVenta(resumen, total);
-                    return NextResponse.json({ success: true });
-                }
+               // Solo activar venta directa si el producto NO requiere reserva
+const productoContextoVenta = obtenerProductoDelContexto(
+    [...historial.map((m: any) => m.content), bodyFinal].join(" "), catalogo
+);
+const productoRequiereReserva = productoContextoVenta?.requiereReserva === true;
+
+if (esIntencionCompra(bodyFinal) && !productoRequiereReserva) {
+    const { resumen, total } = armarResumenCompra(catalogo, historial, bodyFinal);
+    await notificarVenta(resumen, total);
+    return NextResponse.json({ success: true });
+}
 
                 if (!clientePidioFoto) {
                     console.log("[FOTO-BLOCK] Cliente no pidio foto explicitamente");
@@ -1691,11 +1697,14 @@ if (name === "notificar_reserva") {
                 textoRespuesta = textoRespuesta.replace(/\[[^\]]*\]/g, "").trim() || "Entendido.";
             }
 
-            if (esIntencionCompra(body)) {
-                const { resumen, total } = armarResumenCompra(catalogo, historial, body);
-                await notificarVenta(resumen, total);
-                return NextResponse.json({ success: true });
-            }
+const prodCtxFoto = obtenerProductoDelContexto(
+    [...historial.map((m: any) => m.content), bodyFinal].join(" "), catalogo
+);
+if (esIntencionCompra(bodyFinal) && prodCtxFoto?.requiereReserva !== true) {
+    const { resumen, total } = armarResumenCompra(catalogo, historial, bodyFinal);
+    await notificarVenta(resumen, total);
+    return NextResponse.json({ success: true });
+}
 
             await twilioClient.messages.create({ from: to, to: from, body: textoRespuesta });
 // Guardar con mediaUrl si era audio
