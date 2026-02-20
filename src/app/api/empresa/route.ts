@@ -158,7 +158,8 @@ FLUJO ESTRICTO:
 2. Cuando el cliente muestre interés claro, pregunta UNA sola vez: "Quieres hacer la reserva?"
 3. SOLO llama notificar_reserva cuando el cliente responda SI a ESA pregunta puntual.
 4. NUNCA llames notificar_reserva si el cliente solo pregunta por el servicio, precio o disponibilidad.
-5. El sistema manejará el resto del flujo (fecha, hora, persona).
+5. NUNCA llames notificar_pedido_completo para productos [REQUIERE RESERVA]. SIEMPRE usa notificar_reserva.
+6. El sistema manejará el resto del flujo (fecha, hora, persona).
 Metodo: WhatsApp.
 ${data.reglasReserva ? `Instrucciones del negocio para el bot: ${data.reglasReserva}` : ""}`;
         } else {

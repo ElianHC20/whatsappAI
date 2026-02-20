@@ -1668,10 +1668,30 @@ if (name === "notificar_reserva") {
 }
 
             // NOTIFICAR PEDIDO COMPLETO
-            if (name === "notificar_pedido_completo") {
-                await notificarVenta(args.resumen_compra, args.valor_total);
-                return NextResponse.json({ success: true });
-            }
+         // NOTIFICAR PEDIDO COMPLETO
+if (name === "notificar_pedido_completo") {
+    // ── BLOQUEAR si el producto requiere reserva ──
+    const todosCtx = [...historial.map((m: any) => m.content), bodyFinal].join(" ");
+    const prodCtx = obtenerProductoDelContexto(todosCtx, catalogo);
+    
+    if (prodCtx?.requiereReserva === true) {
+        // Redirigir al flujo de reserva
+        const estadoActual = chatDoc.data()?.estadoReserva || null;
+        if (!estadoActual) {
+            await chatRef.update({
+                estadoReserva: 'esperando_fecha',
+                reservaServicio: prodCtx.nombre,
+            });
+            const txt = `Para que fecha quieres la cita?`;
+            await twilioClient.messages.create({ from: to, to: from, body: txt });
+            await guardarHistorial(chatRef, bodyFinal, txt, profileName, false, false);
+        }
+        return NextResponse.json({ success: true });
+    }
+    
+    await notificarVenta(args.resumen_compra, args.valor_total);
+    return NextResponse.json({ success: true });
+}
 
         } else {
             // RESPUESTA TEXTO normal
